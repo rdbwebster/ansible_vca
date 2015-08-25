@@ -1,0 +1,40 @@
+- hosts: localhost
+  connection: local
+  vars:
+    instanceid: '97453e02-e83c-4cae-bbe9-3f7ee6dd8401'
+    admin_pass: 'Vmware123!'
+    public_ip: "107.189.113.86"
+  tasks:
+   - vca_vapp:
+       state: present
+       operation: poweron
+       instance_id: "{{ instanceid }}"
+       vdc_name: 'VDC1'
+       catalog_name: "Public Catalog"
+       template_name: "CentOS64-64BIT"
+       vm_name: VMdemo
+       network_mode: pool
+       admin_password: '{{ admin_pass }}'
+       network_name: "default-routed-network"
+
+     register: myvm
+
+   - debug: var=myvm
+
+   - vca_nat:
+       instance_id: "{{ instanceid }}"
+       vdc_name: 'VDC1'
+       state: present
+       nat_rules: 
+         - rule_type: DNAT
+           original_ip: "{{ public_ip }}"
+           translated_ip: "{{ myvm.vm_details.network_info.ip }}"
+   - vca_fw:
+       instance_id: '{{ instanceid }}'
+       vdc_name: 'VDC1'
+       state: present
+       fw_rules:
+         - description: "Allow all trafic to the public ip"
+           source_ip: "Any"
+           dest_ip: "{{ public_ip }}"
+
