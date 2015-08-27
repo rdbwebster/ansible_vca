@@ -1,0 +1,150 @@
+# This module requires the following variables settings at the shell level:
+# export VCA_USER='vca login user name' 
+# export VCA_PASS='vca login user password'
+# export ANSIBLE_HOST_KEY_CHECKING=False
+
+# This module also requires the following role: https://github.com/jdauphant/ansible-role-nginx
+# Available on https://galaxy.ansible.com/
+# Install with the following command:
+# ansible-galaxy install jdauphant.nginx
+# And ssh-pass if running Ansible on OSX
+# https://gist.github.com/arunoda/7790979
+# brew install https://raw.githubusercontent.com/kadwanev/bigboybrew/master/Library/Formula/sshpass.rb
+
+
+ 
+- hosts: localhost
+  connection: local
+  vars:
+    instanceid: '97453e02-e83c-4cae-bbe9-3f7ee6dd8401'
+    admin_pass: 'Vmware123!'
+    public_ip: "107.189.113.86"
+    vdc: "VDC1"
+    template: "Ubuntu Server 12.04 LTS (amd64 20150127)"
+    catalog: "Public Catalog"
+    network: "default-routed-network"
+    vmname: "VMJenkinsDemo"
+    networkmode: "pool"
+
+  tasks:
+   - vca_vapp:
+       state: present
+       operation: poweron
+       instance_id: "{{ instanceid }}"
+       vdc_name: "{{ vdc }}"
+       catalog_name: "{{ catalog }}"
+       template_name: "{{ template }}"
+       vm_name: "{{ vmname }}"
+       vm_cpus: 4
+       vm_memory: 4096
+       network_mode: "{{ networkmode }}"
+       admin_password: '{{ admin_pass }}'
+       network_name: "{{ network }}"
+
+     register: myvm
+
+   - debug: var=myvm
+
+   # d2p3v29-ext  SNAT 192.168.109.0/24 any 107.189.113.86 any  ANY
+   # d2p3v29-ext  DNAT 107.189.113.86   22  107.189.113.86 22   ANY
+   # d2p3v29-ext  DNAT 107.189.113.86   80  107.189.113.86 80   ANY
+   - vca_nat:
+       instance_id: "{{ instanceid }}"
+       vdc_name: 'VDC1'
+       state: present
+       nat_rules: 
+          - rule_type: DNAT
+            original_ip: "{{ public_ip }}"
+            translated_ip: "{{ myvm.vm_details.network_info.ip }}"
+          
+          # Note: adding original_ip and original_port causes Failure
+          #- rule_type: DNAT
+          #  original_ip: "{{ public_ip }}"
+          #  original_port: "22"
+          #  translated_ip: "{{ myvm.vm_details.network_info.ip }}"
+          #  translated_port: "22"
+          #- rule_type: DNAT
+          #  original_ip: "{{ public_ip }}"
+          #  original_port: "80"
+          #  translated_ip: "{{ myvm.vm_details.network_info.ip }}"
+          #  translated_port: "80"
+          
+          # Issue SNAT gets applied to routed nextwork instead of gateway network
+          #- rule_type: SNAT
+          #  original_ip: "192.168.109.0/24"
+          #  translated_ip: "{{ public_ip }}"
+         
+   #  Any:Any            107.189.113.86:Any   ANY    Allow
+   #  192.168.109.7:Any  Any:Any              ANY    Allow  
+   - vca_fw:
+       instance_id: '{{ instanceid }}'
+       vdc_name: 'VDC1'
+       state: present
+       fw_rules:
+         - description: "Allow all traffic to the public ip"
+           source_ip: "{{myvm.vm_details.network_info.ip}}"
+           dest_ip: "{{ public_ip }}"
+         - description: "Allow all traffic from new ip"
+           source_ip: "{{ public_ip }}"
+           dest_ip: "{{myvm.vm_details.network_info.ip}}"
+ 
+   - name: Reset ssh authorized client keys locally
+     shell: ssh-keygen -R {{ public_ip }}
+
+   - wait_for: host="{{ public_ip }}" port=22 state=started delay=5
+ 
+   - add_host: name="{{ public_ip }}" groups=nginx ansible_ssh_pass="{{ admin_pass }}"
+   
+- hosts: nginx
+  pre_tasks:
+
+   - name: Add static DNS Servers
+     shell: | 
+              if grep --quiet nameserver /etc/resolvconf/resolv.conf.d/tail; then
+               echo dns setup
+              else
+                  echo "nameserver 8.8.8.8" >> /etc/resolvconf/resolv.conf.d/tail
+              fi
+              sudo resolvconf -u 
+
+ 
+   - name: Add Users
+     # borne shell
+     shell: |
+             
+              mkdir /tmp/www
+              echo " <html><head><meta http-equiv="content-type" content="text/html; charset=UTF-8"></head>" > /tmp/www/index.html
+              echo " <body><h1>Welcome to vCloud Air Labs</h1>"  >> /tmp/www/index.html
+              echo "<h3>Append your student id to access your account<br>" >> /tmp/www/index.html
+              echo "For example&nbsp;&nbsp;&nbsp;&nbsp; <p>http://labs.vcair.us/student0</p></h3><br></body></html>" >> /tmp/www/index.html
+
+              for i in `nawk 'BEGIN{ for(i=1;i<=50;i++) print i}'`
+              do
+                 echo "Creating user student$i "
+                 useradd  -m -s /bin/bash -G ubuntu  -p  `openssl passwd -1 vcloudair$i` student$i
+                 mkdir -p  /tmp/www/student$i
+                 chmod 0755 /tmp/www/student$i
+                 chown student$i /tmp/www/student$i
+                 echo "<html><head></head><body><h1>Welcome student${i}</h1></body></html>" > /tmp/www/student$i/index.html
+                 chown student$i /tmp/www/student$i/index.html
+              done
+
+  roles: 
+   - role: jdauphant.nginx
+     nginx_events_params:
+       - worker_connections 512
+       - debug_connection 127.0.0.1
+       - use epoll
+       - multi_accept on
+     nginx_http_params:
+       - sendfile "on"
+       - access_log "/var/log/nginx/access.log"
+     nginx_sites:
+       default:
+         - listen 80
+         - root "/tmp/www"
+         - location / { try_files $uri $uri/ /index.html; }
+         - location /images/ { try_files $uri $uri/ /index.html; }
+  post_tasks:
+
+
